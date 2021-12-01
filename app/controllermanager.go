@@ -23,6 +23,7 @@ import (
 	"k8s.io/client-go/restmapper"
 	certutil "k8s.io/client-go/util/cert"
 	cliflag "k8s.io/component-base/cli/flag"
+	"k8s.io/component-base/cli/globalflag"
 	"k8s.io/component-base/term"
 	"k8s.io/component-base/version/verflag"
 	genericcontrollermanager "k8s.io/controller-manager/app"
@@ -121,6 +122,7 @@ func NewPlatformGcControllerCommand() *cobra.Command {
 
 	fs := cmd.Flags()
 	namedFlagSets := s.Flags()
+	globalflag.AddGlobalFlags(namedFlagSets.FlagSet("global"), cmd.Name())
 	for _, f := range namedFlagSets.FlagSets {
 		fs.AddFlagSet(f)
 	}

@@ -34,6 +34,7 @@ import (
 	garbagecollectorconfig "k8s.io/kubernetes/pkg/controller/garbagecollector/config"
 
 	// add the kubernetes feature gates
+	"k8s.io/component-base/logs"
 	_ "k8s.io/kubernetes/pkg/features"
 )
 
@@ -51,6 +52,7 @@ type GarbageCollectorControllerOptions struct {
 	GCGroup                string
 	Master                 string
 	Kubeconfig             string
+	Logs                   *logs.Options
 }
 
 // NewKubeControllerManagerOptions creates a new KubeControllerManagerOptions with a default config.
@@ -62,6 +64,7 @@ func NewPlatformGcControllerOptions() (*GarbageCollectorControllerOptions, error
 		GCIgnoredResources:     []garbagecollectorconfig.GroupResource{},
 		Master:                 "",
 		Kubeconfig:             "",
+		Logs:                   logs.NewOptions(),
 	}
 	gcIgnoredResources := make([]garbagecollectorconfig.GroupResource, 0, len(garbagecollector.DefaultIgnoredResources()))
 	for r := range garbagecollector.DefaultIgnoredResources() {
@@ -89,6 +92,7 @@ func (g *GarbageCollectorControllerOptions) Flags() cliflag.NamedFlagSets {
 	gcfs.Int32Var(&g.ConcurrentGCSyncs, "concurrent-gc-syncs", g.ConcurrentGCSyncs, "Number of garbage collector workers that are allowed to sync concurrently.")
 	gcfs.BoolVar(&g.EnableGarbageCollector, "enable-garbage-collector", g.EnableGarbageCollector, "Enables the generic garbage collector. MUST be synced with the corresponding flag of the kube-apiserver.")
 	gcfs.StringVar(&g.GCGroup, "gcgroup", "platform.tkestack.io", "specify resoure group to be gc,useage:--gcgroup=platform.tkestack.io")
+	g.Logs.AddFlags(fss.FlagSet("logs"))
 	return fss
 }
 
