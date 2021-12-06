@@ -19,6 +19,9 @@ limitations under the License.
 package options
 
 import (
+	"fmt"
+	"net"
+
 	gcconfig "github.com/tkestack/gc-controller/app/config"
 	v1 "k8s.io/api/core/v1"
 	clientset "k8s.io/client-go/kubernetes"
@@ -34,7 +37,9 @@ import (
 	garbagecollectorconfig "k8s.io/kubernetes/pkg/controller/garbagecollector/config"
 
 	// add the kubernetes feature gates
+	apiserveroptions "k8s.io/apiserver/pkg/server/options"
 	"k8s.io/component-base/logs"
+	cmoptions "k8s.io/controller-manager/options"
 	_ "k8s.io/kubernetes/pkg/features"
 )
 
@@ -44,6 +49,7 @@ const (
 )
 
 type GarbageCollectorControllerOptions struct {
+	Debugging              *cmoptions.DebuggingOptions
 	LeaderElection         componentbaseconfig.LeaderElectionConfiguration
 	ClientConnection       componentbaseconfig.ClientConnectionConfiguration
 	EnableGarbageCollector bool
@@ -52,20 +58,27 @@ type GarbageCollectorControllerOptions struct {
 	GCGroup                string
 	Master                 string
 	Kubeconfig             string
+	SecureServing          *apiserveroptions.SecureServingOptionsWithLoopback
 	Logs                   *logs.Options
 }
 
 // NewKubeControllerManagerOptions creates a new KubeControllerManagerOptions with a default config.
 func NewPlatformGcControllerOptions() (*GarbageCollectorControllerOptions, error) {
 	g := GarbageCollectorControllerOptions{
+		Debugging:              cmoptions.RecommendedDebuggingOptions(),
 		ClientConnection:       componentbaseconfig.ClientConnectionConfiguration{},
 		EnableGarbageCollector: true,
 		ConcurrentGCSyncs:      5,
 		GCIgnoredResources:     []garbagecollectorconfig.GroupResource{},
 		Master:                 "",
 		Kubeconfig:             "",
+		SecureServing:          apiserveroptions.NewSecureServingOptions().WithLoopback(),
 		Logs:                   logs.NewOptions(),
 	}
+	g.SecureServing.ServerCert.CertDirectory = ""
+	g.SecureServing.ServerCert.PairName = "kube-controller-manager" //todo to change
+	g.SecureServing.BindPort = 10257
+
 	gcIgnoredResources := make([]garbagecollectorconfig.GroupResource, 0, len(garbagecollector.DefaultIgnoredResources()))
 	for r := range garbagecollector.DefaultIgnoredResources() {
 		gcIgnoredResources = append(gcIgnoredResources, garbagecollectorconfig.GroupResource{Group: r.Group, Resource: r.Resource})
@@ -110,11 +123,18 @@ func (g *GarbageCollectorControllerOptions) ApplyTo(cfg *gcconfig.Config) error 
 	cfg.GCGroup = g.GCGroup
 	cfg.KubeConfPath = g.Kubeconfig
 
+	if err := g.SecureServing.ApplyTo(&cfg.SecureServing, &cfg.LoopbackClientConfig); err != nil {
+		return err
+	}
+
 	return nil
 }
 
 // Config return a controller manager config objective
 func (s GarbageCollectorControllerOptions) Config() (*gcconfig.Config, error) {
+	if err := s.SecureServing.MaybeDefaultWithSelfSignedCerts("localhost", nil, []net.IP{net.ParseIP("127.0.0.1")}); err != nil {
+		return nil, fmt.Errorf("error creating self-signed certificates: %v", err)
+	}
 	kubeconfig, err := clientcmd.BuildConfigFromFlags(s.Master, s.Kubeconfig)
 	if err != nil {
 		return nil, err

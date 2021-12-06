@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apiserver/pkg/server/healthz"
+	"k8s.io/apiserver/pkg/server/mux"
 	cacheddiscovery "k8s.io/client-go/discovery/cached"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/metadata"
@@ -105,7 +106,7 @@ func NewPlatformGcControllerCommand() *cobra.Command {
 				fmt.Fprintf(os.Stderr, "%v\n", err)
 				os.Exit(1)
 			}
-			if err := Run(c, wait.NeverStop); err != nil {
+			if err := Run(c.Complete(), wait.NeverStop); err != nil {
 				fmt.Fprintf(os.Stderr, "%v\n", err)
 				os.Exit(1)
 			}
@@ -142,7 +143,7 @@ func NewPlatformGcControllerCommand() *cobra.Command {
 }
 
 // Run runs the KubeControllerManagerOptions.  This should never exit.
-func Run(c *config.Config, stopCh <-chan struct{}) error {
+func Run(c *config.CompletedConfig, stopCh <-chan struct{}) error {
 	// Setup any healthz checks we will want to use.
 	var checks []healthz.HealthChecker
 	var electionChecker *tkeleaderelection.HealthzAdaptor
@@ -150,8 +151,19 @@ func Run(c *config.Config, stopCh <-chan struct{}) error {
 		electionChecker = tkeleaderelection.NewLeaderHealthzAdaptor(time.Second * 20)
 		checks = append(checks, electionChecker)
 	}
+	var unsecuredMux *mux.PathRecorderMux
+	if c.SecureServing != nil {
+		unsecuredMux = genericcontrollermanager.NewBaseHandler(&c.Debugging, checks...)
+		handler := genericcontrollermanager.BuildHandlerChain(unsecuredMux, &c.Authorization, &c.Authentication)
+		// TODO: handle stoppedCh returned by c.SecureServing.Serve
+		if _, err := c.SecureServing.Serve(handler, 0, stopCh); err != nil {
+			return err
+		}
+		fmt.Printf("gyf debug: garbage-collector enterred SecureServing\n\n") //get
+	}
 
 	clientBuilder, rootClientBuilder := createClientBuilders(c)
+
 	run := func(ctx context.Context) {
 		context, err := CreateControllerContext(c, rootClientBuilder, clientBuilder, ctx.Done())
 		if err != nil {
@@ -209,7 +221,7 @@ func Run(c *config.Config, stopCh <-chan struct{}) error {
 	panic("unreachable")
 }
 
-func CreateControllerContext(s *config.Config, rootClientBuilder, clientBuilder clientbuilder.ControllerClientBuilder, stop <-chan struct{}) (ControllerContext, error) {
+func CreateControllerContext(s *config.CompletedConfig, rootClientBuilder, clientBuilder clientbuilder.ControllerClientBuilder, stop <-chan struct{}) (ControllerContext, error) {
 	versionedClient := rootClientBuilder.ClientOrDie("shared-informers")
 	sharedInformers := informers.NewSharedInformerFactory(versionedClient, time.Duration(30*time.Second))
 
@@ -265,7 +277,7 @@ func readCA(file string) ([]byte, error) {
 }
 
 // createClientBuilders creates clientBuilder and rootClientBuilder from the given configuration
-func createClientBuilders(c *config.Config) (clientBuilder clientbuilder.ControllerClientBuilder, rootClientBuilder clientbuilder.ControllerClientBuilder) {
+func createClientBuilders(c *config.CompletedConfig) (clientBuilder clientbuilder.ControllerClientBuilder, rootClientBuilder clientbuilder.ControllerClientBuilder) {
 	rootClientBuilder = clientbuilder.SimpleControllerClientBuilder{
 		ClientConfig: c.Kubeconfig,
 	}
