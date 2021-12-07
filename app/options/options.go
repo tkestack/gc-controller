@@ -22,8 +22,10 @@ import (
 	"fmt"
 	"net"
 
-	gcconfig "github.com/tkestack/gc-controller/app/config"
 	v1 "k8s.io/api/core/v1"
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	apiserveroptions "k8s.io/apiserver/pkg/server/options"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	clientset "k8s.io/client-go/kubernetes"
 	clientgokubescheme "k8s.io/client-go/kubernetes/scheme"
 	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -31,107 +33,177 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/record"
 	cliflag "k8s.io/component-base/cli/flag"
-	componentbaseconfig "k8s.io/component-base/config"
-	"k8s.io/component-base/config/options"
+	"k8s.io/component-base/logs"
+	"k8s.io/component-base/metrics"
+	cmoptions "k8s.io/controller-manager/options"
+	kubectrlmgrconfigv1alpha1 "k8s.io/kube-controller-manager/config/v1alpha1"
+	kubecontrollerconfig "k8s.io/kubernetes/cmd/kube-controller-manager/app/config"
+	"k8s.io/kubernetes/pkg/cluster/ports"
+	kubectrlmgrconfig "k8s.io/kubernetes/pkg/controller/apis/config"
+	kubectrlmgrconfigscheme "k8s.io/kubernetes/pkg/controller/apis/config/scheme"
 	"k8s.io/kubernetes/pkg/controller/garbagecollector"
 	garbagecollectorconfig "k8s.io/kubernetes/pkg/controller/garbagecollector/config"
 
 	// add the kubernetes feature gates
-	apiserveroptions "k8s.io/apiserver/pkg/server/options"
-	"k8s.io/component-base/logs"
-	cmoptions "k8s.io/controller-manager/options"
 	_ "k8s.io/kubernetes/pkg/features"
 )
 
 const (
-	// KubeControllerManagerUserAgent is the userAgent name when starting kube-controller managers.
-	KubeControllerManagerUserAgent = "kube-controller-manager"
+	// GCManagerUserAgent is the userAgent name when starting kube-controller managers.
+	GCManagerUserAgent = "kube-controller-manager" //todo to check,what if change to platform-gc
 )
 
-type GarbageCollectorControllerOptions struct {
-	Debugging              *cmoptions.DebuggingOptions
-	LeaderElection         componentbaseconfig.LeaderElectionConfiguration
-	ClientConnection       componentbaseconfig.ClientConnectionConfiguration
-	EnableGarbageCollector bool
-	ConcurrentGCSyncs      int32
-	GCIgnoredResources     []garbagecollectorconfig.GroupResource
-	GCGroup                string
-	Master                 string
-	Kubeconfig             string
-	SecureServing          *apiserveroptions.SecureServingOptionsWithLoopback
-	Logs                   *logs.Options
+// KubeControllerManagerOptions is the main context object for the kube-controller manager.
+type GCManagerOptions struct {
+	Generic                    *cmoptions.GenericControllerManagerConfigurationOptions
+	GarbageCollectorController *GarbageCollectorControllerOptions
+	SecureServing              *apiserveroptions.SecureServingOptionsWithLoopback
+	// TODO: remove insecure serving mode
+	InsecureServing *apiserveroptions.DeprecatedInsecureServingOptionsWithLoopback
+	Authentication  *apiserveroptions.DelegatingAuthenticationOptions
+	Authorization   *apiserveroptions.DelegatingAuthorizationOptions
+	Metrics         *metrics.Options
+	Logs            *logs.Options
+
+	Master                      string
+	Kubeconfig                  string
+	ShowHiddenMetricsForVersion string
 }
 
 // NewKubeControllerManagerOptions creates a new KubeControllerManagerOptions with a default config.
-func NewPlatformGcControllerOptions() (*GarbageCollectorControllerOptions, error) {
-	g := GarbageCollectorControllerOptions{
-		Debugging:              cmoptions.RecommendedDebuggingOptions(),
-		ClientConnection:       componentbaseconfig.ClientConnectionConfiguration{},
-		EnableGarbageCollector: true,
-		ConcurrentGCSyncs:      5,
-		GCIgnoredResources:     []garbagecollectorconfig.GroupResource{},
-		Master:                 "",
-		Kubeconfig:             "",
-		SecureServing:          apiserveroptions.NewSecureServingOptions().WithLoopback(),
-		Logs:                   logs.NewOptions(),
+func NewGCManagerOptions() (*GCManagerOptions, error) {
+	componentConfig, err := NewDefaultComponentConfig(ports.InsecureKubeControllerManagerPort)
+	if err != nil {
+		return nil, err
 	}
-	g.SecureServing.ServerCert.CertDirectory = ""
-	g.SecureServing.ServerCert.PairName = "kube-controller-manager" //todo to change
-	g.SecureServing.BindPort = 10257
+
+	s := GCManagerOptions{
+		Generic: cmoptions.NewGenericControllerManagerConfigurationOptions(&componentConfig.Generic),
+
+		GarbageCollectorController: &GarbageCollectorControllerOptions{
+			&componentConfig.GarbageCollectorController,
+		},
+
+		SecureServing: apiserveroptions.NewSecureServingOptions().WithLoopback(),
+		InsecureServing: (&apiserveroptions.DeprecatedInsecureServingOptions{
+			BindAddress: net.ParseIP(componentConfig.Generic.Address),
+			BindPort:    int(componentConfig.Generic.Port),
+			BindNetwork: "tcp",
+		}).WithLoopback(),
+		Authentication: apiserveroptions.NewDelegatingAuthenticationOptions(),
+		Authorization:  apiserveroptions.NewDelegatingAuthorizationOptions(),
+		Metrics:        metrics.NewOptions(),
+		Logs:           logs.NewOptions(),
+	}
+
+	s.Authentication.RemoteKubeConfigFileOptional = true
+	s.Authorization.RemoteKubeConfigFileOptional = true
+
+	// Set the PairName but leave certificate directory blank to generate in-memory by default
+	s.SecureServing.ServerCert.CertDirectory = ""
+	s.SecureServing.ServerCert.PairName = "kube-controller-manager"
+	s.SecureServing.BindPort = ports.KubeControllerManagerPort
 
 	gcIgnoredResources := make([]garbagecollectorconfig.GroupResource, 0, len(garbagecollector.DefaultIgnoredResources()))
 	for r := range garbagecollector.DefaultIgnoredResources() {
 		gcIgnoredResources = append(gcIgnoredResources, garbagecollectorconfig.GroupResource{Group: r.Group, Resource: r.Resource})
 	}
-	g.GCIgnoredResources = gcIgnoredResources
-	g.LeaderElection.ResourceName = "platfor-gc-controller"
-	g.LeaderElection.ResourceNamespace = "kube-system"
 
-	return &g, nil
+	s.GarbageCollectorController.GCIgnoredResources = gcIgnoredResources
+	s.Generic.LeaderElection.ResourceName = "kube-controller-manager"
+	s.Generic.LeaderElection.ResourceNamespace = "kube-system"
+
+	return &s, nil
+}
+
+// NewDefaultComponentConfig returns kube-controller manager configuration object.
+func NewDefaultComponentConfig(insecurePort int32) (kubectrlmgrconfig.KubeControllerManagerConfiguration, error) {
+	versioned := kubectrlmgrconfigv1alpha1.KubeControllerManagerConfiguration{}
+	kubectrlmgrconfigscheme.Scheme.Default(&versioned)
+
+	internal := kubectrlmgrconfig.KubeControllerManagerConfiguration{}
+	if err := kubectrlmgrconfigscheme.Scheme.Convert(&versioned, &internal, nil); err != nil {
+		return internal, err
+	}
+	internal.Generic.Port = insecurePort
+	return internal, nil
 }
 
 // Flags returns flags for a specific APIServer by section name
-func (g *GarbageCollectorControllerOptions) Flags() cliflag.NamedFlagSets {
+func (s *GCManagerOptions) Flags() cliflag.NamedFlagSets {
 	fss := cliflag.NamedFlagSets{}
-	genericfs := fss.FlagSet("generic")
-	genericfs.StringVar(&g.ClientConnection.ContentType, "kube-api-content-type", g.ClientConnection.ContentType, "Content type of requests sent to apiserver.")
-	genericfs.Float32Var(&g.ClientConnection.QPS, "kube-api-qps", g.ClientConnection.QPS, "QPS to use while talking with kubernetes apiserver.")
-	genericfs.Int32Var(&g.ClientConnection.Burst, "kube-api-burst", g.ClientConnection.Burst, "Burst to use while talking with kubernetes apiserver.")
-	genericfs.StringVar(&g.Master, "master", g.Master, "The address of the Kubernetes API server (overrides any value in kubeconfig).")
-	genericfs.StringVar(&g.Kubeconfig, "kubeconfig", g.Kubeconfig, "Path to kubeconfig file with authorization and master location information.")
-	options.BindLeaderElectionFlags(&g.LeaderElection, genericfs)
+	s.Generic.AddFlags(&fss, []string{"gabagecollector"}, []string{})
 
-	gcfs := fss.FlagSet("garbagecollector controller")
-	gcfs.Int32Var(&g.ConcurrentGCSyncs, "concurrent-gc-syncs", g.ConcurrentGCSyncs, "Number of garbage collector workers that are allowed to sync concurrently.")
-	gcfs.BoolVar(&g.EnableGarbageCollector, "enable-garbage-collector", g.EnableGarbageCollector, "Enables the generic garbage collector. MUST be synced with the corresponding flag of the kube-apiserver.")
-	gcfs.StringVar(&g.GCGroup, "gcgroup", "platform.tkestack.io", "specify resoure group to be gc,useage:--gcgroup=platform.tkestack.io")
-	g.Logs.AddFlags(fss.FlagSet("logs"))
+	s.SecureServing.AddFlags(fss.FlagSet("secure serving"))
+	s.InsecureServing.AddUnqualifiedFlags(fss.FlagSet("insecure serving"))
+	s.Authentication.AddFlags(fss.FlagSet("authentication"))
+	s.Authorization.AddFlags(fss.FlagSet("authorization"))
+
+	s.GarbageCollectorController.AddFlags(fss.FlagSet("garbagecollector controller"))
+	s.Metrics.AddFlags(fss.FlagSet("metrics"))
+	s.Logs.AddFlags(fss.FlagSet("logs"))
+
+	fs := fss.FlagSet("misc")
+	fs.StringVar(&s.Master, "master", s.Master, "The address of the Kubernetes API server (overrides any value in kubeconfig).")
+	fs.StringVar(&s.Kubeconfig, "kubeconfig", s.Kubeconfig, "Path to kubeconfig file with authorization and master location information.")
+	utilfeature.DefaultMutableFeatureGate.AddFlag(fss.FlagSet("generic"))
+
 	return fss
 }
 
 // ApplyTo fills up controller manager config with options.
-func (g *GarbageCollectorControllerOptions) ApplyTo(cfg *gcconfig.Config) error {
-	if g == nil {
-		return nil
-	}
-	cfg.ClientConnection = g.ClientConnection
-	cfg.LeaderElection = g.LeaderElection
-
-	cfg.ConcurrentGCSyncs = g.ConcurrentGCSyncs
-	cfg.GCIgnoredResources = g.GCIgnoredResources
-	cfg.EnableGarbageCollector = g.EnableGarbageCollector
-	cfg.GCGroup = g.GCGroup
-	cfg.KubeConfPath = g.Kubeconfig
-
-	if err := g.SecureServing.ApplyTo(&cfg.SecureServing, &cfg.LoopbackClientConfig); err != nil {
+func (s *GCManagerOptions) ApplyTo(c *kubecontrollerconfig.Config) error {
+	if err := s.Generic.ApplyTo(&c.ComponentConfig.Generic); err != nil {
 		return err
 	}
+
+	if err := s.GarbageCollectorController.ApplyTo(&c.ComponentConfig.GarbageCollectorController); err != nil {
+		return err
+	}
+
+	if err := s.InsecureServing.ApplyTo(&c.InsecureServing, &c.LoopbackClientConfig); err != nil {
+		return err
+	}
+	if err := s.SecureServing.ApplyTo(&c.SecureServing, &c.LoopbackClientConfig); err != nil {
+		return err
+	}
+	if s.SecureServing.BindPort != 0 || s.SecureServing.Listener != nil {
+		if err := s.Authentication.ApplyTo(&c.Authentication, c.SecureServing, nil); err != nil {
+			return err
+		}
+		if err := s.Authorization.ApplyTo(&c.Authorization); err != nil {
+			return err
+		}
+	}
+
+	// sync back to component config
+	// TODO: find more elegant way than syncing back the values.
+	c.ComponentConfig.Generic.Port = int32(s.InsecureServing.BindPort)
+	c.ComponentConfig.Generic.Address = s.InsecureServing.BindAddress.String()
 
 	return nil
 }
 
+// Validate is used to validate the options and config before launching the controller manager
+func (s *GCManagerOptions) Validate(allControllers []string, disabledByDefaultControllers []string) error {
+	var errs []error
+
+	errs = append(errs, s.Generic.Validate(allControllers, disabledByDefaultControllers)...)
+	errs = append(errs, s.GarbageCollectorController.Validate()...)
+	errs = append(errs, s.SecureServing.Validate()...)
+	errs = append(errs, s.InsecureServing.Validate()...)
+	errs = append(errs, s.Authentication.Validate()...)
+	errs = append(errs, s.Authorization.Validate()...)
+	errs = append(errs, s.Metrics.Validate()...)
+	errs = append(errs, s.Logs.Validate()...)
+
+	// TODO: validate component config, master and kubeconfig
+
+	return utilerrors.NewAggregate(errs)
+}
+
 // Config return a controller manager config objective
-func (s GarbageCollectorControllerOptions) Config() (*gcconfig.Config, error) {
+func (s GCManagerOptions) Config() (*kubecontrollerconfig.Config, error) {
 	if err := s.SecureServing.MaybeDefaultWithSelfSignedCerts("localhost", nil, []net.IP{net.ParseIP("127.0.0.1")}); err != nil {
 		return nil, fmt.Errorf("error creating self-signed certificates: %v", err)
 	}
@@ -140,18 +212,18 @@ func (s GarbageCollectorControllerOptions) Config() (*gcconfig.Config, error) {
 		return nil, err
 	}
 	kubeconfig.DisableCompression = true
-	kubeconfig.ContentConfig.AcceptContentTypes = s.ClientConnection.AcceptContentTypes
-	kubeconfig.ContentConfig.ContentType = s.ClientConnection.ContentType
-	kubeconfig.QPS = s.ClientConnection.QPS
-	kubeconfig.Burst = int(s.ClientConnection.Burst)
+	kubeconfig.ContentConfig.AcceptContentTypes = s.Generic.ClientConnection.AcceptContentTypes
+	kubeconfig.ContentConfig.ContentType = s.Generic.ClientConnection.ContentType
+	kubeconfig.QPS = s.Generic.ClientConnection.QPS
+	kubeconfig.Burst = int(s.Generic.ClientConnection.Burst)
 
-	client, err := clientset.NewForConfig(restclient.AddUserAgent(kubeconfig, KubeControllerManagerUserAgent))
+	client, err := clientset.NewForConfig(restclient.AddUserAgent(kubeconfig, GCManagerUserAgent))
 	if err != nil {
 		return nil, err
 	}
 
-	eventRecorder := createRecorder(client, KubeControllerManagerUserAgent)
-	c := &gcconfig.Config{
+	eventRecorder := createRecorder(client, GCManagerUserAgent)
+	c := &kubecontrollerconfig.Config{
 		Client:        client,
 		Kubeconfig:    kubeconfig,
 		EventRecorder: eventRecorder,
@@ -159,7 +231,9 @@ func (s GarbageCollectorControllerOptions) Config() (*gcconfig.Config, error) {
 	if err := s.ApplyTo(c); err != nil {
 		return nil, err
 	}
+	s.Metrics.Apply()
 
+	s.Logs.Apply()
 	return c, nil
 }
 

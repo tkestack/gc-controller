@@ -21,29 +21,30 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
-	componentbaseconfig "k8s.io/component-base/config"
-	gcconfig "k8s.io/kubernetes/pkg/controller/garbagecollector/config"
+	kubectrlmgrconfig "k8s.io/kubernetes/pkg/controller/apis/config"
 )
 
 // Config is the main context object for the controller manager.
 type Config struct {
-	ClientConnection componentbaseconfig.ClientConnectionConfiguration
-	LeaderElection   componentbaseconfig.LeaderElectionConfiguration
+	ComponentConfig kubectrlmgrconfig.KubeControllerManagerConfiguration
 
-	EnableGarbageCollector bool
-	ConcurrentGCSyncs      int32
-	GCIgnoredResources     []gcconfig.GroupResource
-	GCGroup                string
-	Debugging              componentbaseconfig.DebuggingConfiguration
-	SecureServing          *apiserver.SecureServingInfo
-	LoopbackClientConfig   *restclient.Config
-	Authentication         apiserver.AuthenticationInfo
-	Authorization          apiserver.AuthorizationInfo
+	SecureServing *apiserver.SecureServingInfo
+	// LoopbackClientConfig is a config for a privileged loopback connection
+	LoopbackClientConfig *restclient.Config
 
-	Client        *clientset.Clientset
-	Kubeconfig    *restclient.Config
+	// TODO: remove deprecated insecure serving
+	InsecureServing *apiserver.DeprecatedInsecureServingInfo
+	Authentication  apiserver.AuthenticationInfo
+	Authorization   apiserver.AuthorizationInfo
+
+	// the general kube client
+	Client *clientset.Clientset
+
+	// the rest config for the master
+	Kubeconfig *restclient.Config
+
+	// the event sink
 	EventRecorder record.EventRecorder
-	KubeConfPath  string
 }
 
 type completedConfig struct {
@@ -56,6 +57,7 @@ type CompletedConfig struct {
 	*completedConfig
 }
 
+// Complete fills in any fields not set that are required to have valid data. It's mutating the receiver.
 func (c *Config) Complete() *CompletedConfig {
 	cc := completedConfig{c}
 

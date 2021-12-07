@@ -17,7 +17,7 @@ func main() {
 
 	pflag.CommandLine.SetNormalizeFunc(cliflag.WordSepNormalizeFunc)
 
-	command := app.NewPlatformGcControllerCommand()
+	command := app.NewGCManagerCommand()
 
 	logs.InitLogs()
 	defer logs.FlushLogs()

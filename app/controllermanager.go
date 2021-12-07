@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/tkestack/gc-controller/app/options"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/apiserver/pkg/server"
 	"k8s.io/apiserver/pkg/server/healthz"
 	"k8s.io/apiserver/pkg/server/mux"
 	cacheddiscovery "k8s.io/client-go/discovery/cached"
@@ -23,6 +25,7 @@ import (
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/restmapper"
 	certutil "k8s.io/client-go/util/cert"
+	cloudprovider "k8s.io/cloud-provider"
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/cli/globalflag"
 	"k8s.io/component-base/term"
@@ -31,7 +34,7 @@ import (
 	"k8s.io/controller-manager/pkg/clientbuilder"
 	"k8s.io/controller-manager/pkg/informerfactory"
 	"k8s.io/klog"
-	gcconfig "k8s.io/kubernetes/pkg/controller/garbagecollector/config"
+	kubectrlmgrconfig "k8s.io/kubernetes/pkg/controller/apis/config"
 	tkeapp "tkestack.io/tke/cmd/tke-platform-controller/app"
 	tkeconfig "tkestack.io/tke/cmd/tke-platform-controller/app/config"
 	tkeoptions "tkestack.io/tke/cmd/tke-platform-controller/app/options"
@@ -49,8 +52,8 @@ const (
 	ConfigzName = "kubecontrollermanager.config.k8s.io"
 )
 
+type ControllerLoopMode int
 type ControllerContext struct {
-	// ClientBuilder will provide a client for this controller to use
 	ClientBuilder clientbuilder.ControllerClientBuilder
 
 	// InformerFactory gives access to informers for the controller.
@@ -62,11 +65,25 @@ type ControllerContext struct {
 	// would become GenericInformerFactory and take a dynamic client.
 	ObjectOrMetadataInformerFactory informerfactory.InformerFactory
 
-	EnableGarbageCollector bool
-	ConcurrentGCSyncs      int32
-	GCIgnoredResources     []gcconfig.GroupResource
-	GCGroup                string
-	RESTMapper             *restmapper.DeferredDiscoveryRESTMapper
+	// ComponentConfig provides access to init options for a given controller
+	ComponentConfig kubectrlmgrconfig.KubeControllerManagerConfiguration
+
+	// DeferredDiscoveryRESTMapper is a RESTMapper that will defer
+	// initialization of the RESTMapper until the first mapping is
+	// requested.
+	RESTMapper *restmapper.DeferredDiscoveryRESTMapper
+
+	// AvailableResources is a map listing currently available resources
+	AvailableResources map[schema.GroupVersionResource]bool
+
+	// Cloud is the cloud provider interface for the controllers to use.
+	// It must be initialized and ready to use.
+	Cloud cloudprovider.Interface
+
+	// Control for which control loops to be run
+	// IncludeCloudLoops is for a kube-controller-manager running all loops
+	// ExternalLoops is for a kube-controller-manager running with a cloud-controller-manager
+	LoopMode ControllerLoopMode
 
 	// Stop is the stop channel
 	Stop <-chan struct{}
@@ -82,8 +99,8 @@ type ControllerContext struct {
 }
 
 // NewPlatformGcControllerCommand creates a *cobra.Command object with default parameters
-func NewPlatformGcControllerCommand() *cobra.Command {
-	s, err := options.NewPlatformGcControllerOptions()
+func NewGCManagerCommand() *cobra.Command {
+	s, err := options.NewGCManagerOptions()
 	if err != nil {
 		klog.Fatalf("unable to initialize command options: %v", err)
 	}
@@ -142,34 +159,44 @@ func NewPlatformGcControllerCommand() *cobra.Command {
 	return cmd
 }
 
+func ResyncPeriod(c *config.CompletedConfig) func() time.Duration {
+	return func() time.Duration {
+		factor := rand.Float64() + 1
+		return time.Duration(float64(c.ComponentConfig.Generic.MinResyncPeriod.Nanoseconds()) * factor)
+	}
+}
+
 // Run runs the KubeControllerManagerOptions.  This should never exit.
 func Run(c *config.CompletedConfig, stopCh <-chan struct{}) error {
 	// Setup any healthz checks we will want to use.
 	var checks []healthz.HealthChecker
 	var electionChecker *tkeleaderelection.HealthzAdaptor
-	if c.LeaderElection.LeaderElect {
+	if c.ComponentConfig.Generic.LeaderElection.LeaderElect {
 		electionChecker = tkeleaderelection.NewLeaderHealthzAdaptor(time.Second * 20)
 		checks = append(checks, electionChecker)
 	}
 	var unsecuredMux *mux.PathRecorderMux
-	if c.SecureServing != nil {
-		unsecuredMux = genericcontrollermanager.NewBaseHandler(&c.Debugging, checks...)
-		handler := genericcontrollermanager.BuildHandlerChain(unsecuredMux, &c.Authorization, &c.Authentication)
-		// TODO: handle stoppedCh returned by c.SecureServing.Serve
-		if _, err := c.SecureServing.Serve(handler, 0, stopCh); err != nil {
+	if c.InsecureServing != nil {
+		unsecuredMux = genericcontrollermanager.NewBaseHandler(&c.ComponentConfig.Generic.Debugging, checks...)
+		insecureSuperuserAuthn := server.AuthenticationInfo{Authenticator: &server.InsecureSuperuser{}}
+		handler := genericcontrollermanager.BuildHandlerChain(unsecuredMux, nil, &insecureSuperuserAuthn)
+		if err := c.InsecureServing.Serve(handler, 0, stopCh); err != nil {
 			return err
 		}
-		fmt.Printf("gyf debug: garbage-collector enterred SecureServing\n\n") //get
 	}
 
 	clientBuilder, rootClientBuilder := createClientBuilders(c)
 
 	run := func(ctx context.Context) {
-		context, err := CreateControllerContext(c, rootClientBuilder, clientBuilder, ctx.Done())
+		context, err := CreateControllerContext(c, rootClientBuilder, clientBuilder, ctx.Done()) //in
 		if err != nil {
 			klog.Fatalf("error building controller context: %v", err)
 		}
-		startGarbageCollectorController(context)
+		startGarbageCollectorController(context) //之前代码，少了这三行
+		context.InformerFactory.Start(context.Stop)
+		context.ObjectOrMetadataInformerFactory.Start(context.Stop)
+		close(context.InformersStarted)
+
 		select {}
 	}
 
@@ -223,10 +250,10 @@ func Run(c *config.CompletedConfig, stopCh <-chan struct{}) error {
 
 func CreateControllerContext(s *config.CompletedConfig, rootClientBuilder, clientBuilder clientbuilder.ControllerClientBuilder, stop <-chan struct{}) (ControllerContext, error) {
 	versionedClient := rootClientBuilder.ClientOrDie("shared-informers")
-	sharedInformers := informers.NewSharedInformerFactory(versionedClient, time.Duration(30*time.Second))
+	sharedInformers := informers.NewSharedInformerFactory(versionedClient, ResyncPeriod(s)())
 
 	metadataClient := metadata.NewForConfigOrDie(rootClientBuilder.ConfigOrDie("metadata-informers"))
-	metadataInformers := metadatainformer.NewSharedInformerFactory(metadataClient, time.Duration(30*time.Second))
+	metadataInformers := metadatainformer.NewSharedInformerFactory(metadataClient, ResyncPeriod(s)())
 
 	// If apiserver is not running we should wait for some time and fail only then. This is particularly
 	// important when we start apiserver and controller manager at the same time.
@@ -242,17 +269,21 @@ func CreateControllerContext(s *config.CompletedConfig, rootClientBuilder, clien
 		restMapper.Reset()
 	}, 30*time.Second, stop)
 
+	availableResources, err := GetAvailableResources(rootClientBuilder)
+	if err != nil {
+		return ControllerContext{}, err
+	}
+
 	ctx := ControllerContext{
-		ClientBuilder:                   clientBuilder,   //do
-		InformerFactory:                 sharedInformers, //do
+		ClientBuilder:                   clientBuilder,
+		InformerFactory:                 sharedInformers,
 		ObjectOrMetadataInformerFactory: informerfactory.NewInformerFactory(sharedInformers, metadataInformers),
-		EnableGarbageCollector:          s.EnableGarbageCollector,
-		ConcurrentGCSyncs:               s.ConcurrentGCSyncs,
-		GCIgnoredResources:              s.GCIgnoredResources,
-		GCGroup:                         s.GCGroup,
+		ComponentConfig:                 s.ComponentConfig,
 		RESTMapper:                      restMapper,
+		AvailableResources:              availableResources,
 		Stop:                            stop,
 		InformersStarted:                make(chan struct{}),
+		ResyncPeriod:                    ResyncPeriod(s),
 	}
 	return ctx, nil
 }
