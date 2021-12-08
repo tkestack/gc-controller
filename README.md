@@ -9,4 +9,4 @@ platform-gc-controller is used to gc resources under group platform.tkestack.io
 ./platform-gc-controller --kubeconfig ./admin.conf --leader-elect=true --gcgroup="platform.tkestack.io"
 
 ### deploy as a docker
-todo
+make
