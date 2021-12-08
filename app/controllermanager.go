@@ -158,6 +158,9 @@ func Run(c *config.Config, stopCh <-chan struct{}) error {
 			klog.Fatalf("error building controller context: %v", err)
 		}
 		startGarbageCollectorController(context)
+		context.InformerFactory.Start(context.Stop)
+		context.ObjectOrMetadataInformerFactory.Start(context.Stop)
+		close(context.InformersStarted)
 		select {}
 	}
 
