@@ -1,9 +1,9 @@
 # platform-gc-controller 
 ----
-platform-gc-controller is used to gc resources under group platform.tkestack.io
+#### platform-gc-controller is used to gc resources under group platform.tkestack.io
 ----
 
-## To start using K8s
+## To start using platform gc
 
 ### use binary
 ./platform-gc-controller --kubeconfig ./admin.conf --leader-elect=true --gcgroup="platform.tkestack.io"
