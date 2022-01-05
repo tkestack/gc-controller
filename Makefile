@@ -1,6 +1,6 @@
 all: push
-TAG = 1.0.0
-PREFIX = ccr.ccs.tencentyun.com/lutzowguo/tdcc-platform-gc
+TAG = v1.0.0
+PREFIX = csighub.tencentyun.com/lutzowguo/tdcc-platform-gc
 
 push: container clean
 	docker push $(PREFIX):$(TAG)

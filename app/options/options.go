@@ -85,7 +85,7 @@ func (g *GarbageCollectorControllerOptions) Flags() cliflag.NamedFlagSets {
 	genericfs.Float32Var(&g.ClientConnection.QPS, "kube-api-qps", g.ClientConnection.QPS, "QPS to use while talking with kubernetes apiserver.")
 	genericfs.Int32Var(&g.ClientConnection.Burst, "kube-api-burst", g.ClientConnection.Burst, "Burst to use while talking with kubernetes apiserver.")
 	genericfs.StringVar(&g.Master, "master", g.Master, "The address of the Kubernetes API server (overrides any value in kubeconfig).")
-	genericfs.StringVar(&g.Kubeconfig, "kubeconfig", "/etc/config/tke-platform-api.conf", "Path to kubeconfig file with authorization and master location information.")
+	genericfs.StringVar(&g.Kubeconfig, "kubeconfig", "/app/conf/tdcc-platform-config.conf", "kubeconfig file path with authorization and master location info.")
 	options.BindLeaderElectionFlags(&g.LeaderElection, genericfs)
 
 	gcfs := fss.FlagSet("garbagecollector controller")

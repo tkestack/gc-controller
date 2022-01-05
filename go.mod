@@ -35,21 +35,15 @@ replace (
 )
 
 require (
-	github.com/go-bindata/go-bindata v3.1.2+incompatible
-	github.com/onsi/ginkgo v1.14.0
 	github.com/spf13/cobra v1.2.1
 	github.com/spf13/pflag v1.0.5
 	k8s.io/api v0.22.3 //ct
 	k8s.io/apimachinery v0.22.3
 	k8s.io/apiserver v0.22.3
 	k8s.io/client-go v12.0.0+incompatible
-	k8s.io/code-generator v0.22.3
 	k8s.io/component-base v0.22.3
 	k8s.io/controller-manager v0.22.3
-	k8s.io/gengo v0.0.0-20201214224949-b6c5ce23f027
 	k8s.io/klog v1.0.0
-	k8s.io/kube-openapi v0.0.0-20211109043538-20434351676c
 	k8s.io/kubernetes v1.22.4
-	k8s.io/utils v0.0.0-20210819203725-bdf08cb9a70a
 	tkestack.io/tke v0.0.0-00010101000000-000000000000
 )
